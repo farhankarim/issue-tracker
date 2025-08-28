@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import Issue from "./Issue";
+import AddIssue from "./AddIssue";
 
 const fakeIssues = [
   {
@@ -26,14 +27,16 @@ const App = () => {
   return (
     <div>
       <h1 className="logo" style={{ color: "blue", fontSize: "24px", fontFamily: "Arial, sans-serif" }}>Issue Tracker</h1>
-      {fakeIssues.map((issue) => (
+      <AddIssue />
+      {/* {fakeIssues.map((issue) => (
         <Issue
           key={issue.id}
           title={issue.title}
           description={issue.description}
           status={issue.status}
+          
         />
-      ))}
+      ))} */}
     </div>
   );
 };
