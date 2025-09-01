@@ -1,7 +1,7 @@
 {
   "name": "api-design-v5",
   "version": "1.0.0",
-  "description": "Habit Tracker API for Node.js course",
+  "description": "Issue Tracker API for Node.js course",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
@@ -12,7 +12,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "keywords": [
-    "habit-tracker",
+    "Issue-tracker",
     "api",
     "nodejs",
     "express",
