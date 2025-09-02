@@ -4,9 +4,22 @@ import issueRoutes from './routes/issueRoutes.ts'
 import userRoutes from './routes/userRoutes.ts'
 import tagRoutes from './routes/tagRoutes.ts'
 
-const app = express()
+import cors from 'cors'
+import morgan from 'morgan'
+import helmet from 'helmet'
+import { isTest } from '../env.ts'
 
-// Health check endpoint (direct on app)
+const app = express()
+app.use(helmet())
+app.use(cors())
+app.use(express.json())
+app.use(express.urlencoded({ extended: true }))
+app.use(
+  morgan('dev', {
+    skip: () => isTest(),
+  })
+)
+
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
@@ -15,11 +28,10 @@ app.get('/health', (req, res) => {
   })
 })
 
-// Mount routers with base paths
-app.use('/api/auth', authRoutes)    // All auth routes prefixed with /api/auth
-app.use('/api/users', userRoutes)   // All user routes prefixed with /api/users  
-app.use('/api/issues', issueRoutes) // All Issue routes prefixed with /api/issues
-app.use('/api/tags', tagRoutes)     // All tag routes prefixed with /api/tags
+app.use('/api/auth', authRoutes)
+app.use('/api/users', userRoutes)
+app.use('/api/issues', issueRoutes)
+app.use('/api/tags', tagRoutes)
 
 export { app }
 export default app

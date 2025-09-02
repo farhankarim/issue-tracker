@@ -1,4 +1,12 @@
 import { Router } from 'express'
+import { validateBody, validateQuery } from '../middlewares/validation.ts'
+import {z} from 'zod'
+
+const createIssueSchema = z.object({
+  title: z.string().min(2).max(100),
+  description: z.string().min(5).max(1000),
+  status: z.enum(['open', 'in_progress', 'closed']),
+})
 
 const router = Router()
 
@@ -7,7 +15,7 @@ router.get('/', (req, res) => {
   res.json({ message: 'Get all issues' })
 })
 
-router.post('/', (req, res) => {
+router.post('/',validateBody(createIssueSchema), (req, res) => {
   res.status(201).json({ message: 'issue created' })
 })
 
