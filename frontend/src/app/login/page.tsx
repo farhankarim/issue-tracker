@@ -7,9 +7,12 @@ import { useAppStore } from '@/lib/store';
 import Snackbar from '@/components/snackbar';
 import AlertDialog from '@/components/alert-dialog';
 
-const CORRECT_LOGIN_ID = 'user01';
-const CORRECT_PASSWORD = 'Admin@12345';
 const BLOCK_DURATION_MS = 15 * 60 * 1000;
+
+const USERS: { loginId: string; password: string; name: string; email: string; role: string }[] = [
+  { loginId: 'user01', password: 'Admin@12345', name: 'Sales User', email: 'user01@example.com', role: 'sales_rep' },
+  { loginId: 'Christine_Brakus56@yahoo.com', password: 'farhan', name: 'Christine Brakus', email: 'Christine_Brakus56@yahoo.com', role: 'sales_rep' },
+];
 
 export default function LoginPage() {
   const router = useRouter();
@@ -77,9 +80,10 @@ export default function LoginPage() {
     }
 
     // Correct credentials always succeed — reset any lockout state
-    if (loginId === CORRECT_LOGIN_ID && password === CORRECT_PASSWORD) {
+    const matchedUser = USERS.find(u => u.loginId === loginId && u.password === password);
+    if (matchedUser) {
       resetFailedLogin();
-      login({ name: 'Sales User', email: 'user01@example.com', role: 'sales_rep', loginId: 'user01' });
+      login({ name: matchedUser.name, email: matchedUser.email, role: matchedUser.role, loginId: matchedUser.loginId });
       navigateAfterLogin();
       return;
     }
