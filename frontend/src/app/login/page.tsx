@@ -76,6 +76,15 @@ export default function LoginPage() {
       return;
     }
 
+    // Correct credentials always succeed — reset any lockout state
+    if (loginId === CORRECT_LOGIN_ID && password === CORRECT_PASSWORD) {
+      resetFailedLogin();
+      login({ name: 'Sales User', email: 'user01@example.com', role: 'sales_rep', loginId: 'user01' });
+      navigateAfterLogin();
+      return;
+    }
+
+    // Wrong credentials — enforce lockout before incrementing
     if (accountPermanentlyBlocked) {
       setSnackbar({ visible: true, message: 'Account is permanently blocked', type: 'error' });
       return;
@@ -86,14 +95,6 @@ export default function LoginPage() {
       return;
     }
 
-    if (loginId === CORRECT_LOGIN_ID && password === CORRECT_PASSWORD) {
-      resetFailedLogin();
-      login({ name: 'Sales User', email: 'user01@example.com', role: 'sales_rep', loginId: 'user01' });
-      navigateAfterLogin();
-      return;
-    }
-
-    // Wrong credentials
     const newAttempts = failedLoginAttempts + 1;
     incrementFailedLogin();
 
@@ -123,7 +124,9 @@ export default function LoginPage() {
     router.push('/shift-start');
   };
 
-  const loginDisabled = accountPermanentlyBlocked || isTemporarilyBlocked;
+  // Only disable the button for permanently blocked accounts — a temporarily
+  // blocked user can still log in with the correct credentials.
+  const loginDisabled = accountPermanentlyBlocked;
 
   return (
     <div className="min-h-screen bg-[var(--surface)] flex flex-col items-center justify-center px-6 py-12">
