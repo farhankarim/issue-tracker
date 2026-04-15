@@ -1,23 +1,14 @@
-import { drizzle } from 'drizzle-orm/node-postgres'
-import { Pool } from 'pg'
+import { drizzle } from 'drizzle-orm/better-sqlite3'
+import Database from 'better-sqlite3'
 import * as schema from './schema.ts'
-import { env, isProd } from '../../env.ts'
-import { remember } from '@epic-web/remember'
+import { env } from '../../env.ts'
 
-const createPool = () => {
-  return new Pool({
-    connectionString: env.DATABASE_URL,
-  })
-}
+const sqlite = new Database(env.DATABASE_URL)
 
-let client
+// Enable WAL mode and foreign key enforcement
+sqlite.pragma('journal_mode = WAL')
+sqlite.pragma('foreign_keys = ON')
 
-if (isProd()) {
-  client = createPool()
-} else {
-  client = remember('dbPool', () => createPool())
-}
-
-export const db = drizzle({ client, schema })
+export const db = drizzle(sqlite, { schema })
 
 export default db
