@@ -4,6 +4,7 @@ import { useState, useMemo, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowLeft, Eye, EyeOff, Check, X } from 'lucide-react';
 import Snackbar from '@/components/snackbar';
+import { useAppStore } from '@/lib/store';
 
 const CORRECT_OLD_PASSWORD = 'Admin@12345';
 
