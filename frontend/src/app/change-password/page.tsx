@@ -32,6 +32,7 @@ function ChangePasswordContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const flowType = searchParams.get('flow') || '';
+  const { setDeviceRegistered } = useAppStore();
 
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -56,7 +57,8 @@ function ChangePasswordContent() {
 
     setTimeout(() => {
       if (flowType === 'NewUser') {
-        router.push('/verify-otp?flow=NewUser');
+        setDeviceRegistered(true);
+        router.push('/shift-start');
       } else {
         router.push('/login');
       }

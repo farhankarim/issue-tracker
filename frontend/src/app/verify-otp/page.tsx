@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowLeft } from 'lucide-react';
 import Snackbar from '@/components/snackbar';
+import { useAppStore } from '@/lib/store';
 
 const CORRECT_OTP = '1234';
 const OTP_DURATION = 60;
@@ -12,6 +13,7 @@ function VerifyOTPContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const flowType = searchParams.get('flow') || '';
+  const { setDeviceRegistered } = useAppStore();
 
   const [otp, setOtp] = useState(['', '', '', '']);
   const [timer, setTimer] = useState(OTP_DURATION);
@@ -36,6 +38,7 @@ function VerifyOTPContent() {
         router.push('/change-password?flow=NewUser');
         break;
       case 'NewDevice':
+        setDeviceRegistered(true);
         router.push('/shift-start');
         break;
       case 'ForgotPassword':
@@ -44,7 +47,7 @@ function VerifyOTPContent() {
       default:
         router.push('/login');
     }
-  }, [flowType, router]);
+  }, [flowType, router, setDeviceRegistered]);
 
   const verifyOtp = useCallback(
     (code: string) => {
