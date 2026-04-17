@@ -34,6 +34,12 @@
 19. [How Authentication Works (JWT + bcrypt)](#19-how-authentication-works-jwt--bcrypt)
 20. [Project Conventions & Code Style](#20-project-conventions--code-style)
 21. [Next Steps — Implementing the Stubs](#21-next-steps--implementing-the-stubs)
+22. [CRUD Deep Dive — Concept Reference](#22-crud-deep-dive--concept-reference)
+23. [Users — CRUD Operations & UI](#23-users--crud-operations--ui)
+24. [Issues — CRUD Operations & UI](#24-issues--crud-operations--ui)
+25. [Tags — CRUD Operations & UI](#25-tags--crud-operations--ui)
+26. [Auth — Operations & UI](#26-auth--operations--ui)
+27. [Connecting a Frontend to the API](#27-connecting-a-frontend-to-the-api)
 
 ---
 
@@ -1209,6 +1215,1775 @@ and roll it back after so every test starts clean.
 | JWT | [jwt.io introduction](https://jwt.io/introduction) |
 | REST API design | [restfulapi.net](https://restfulapi.net) |
 | HTTP status codes | [developer.mozilla.org/HTTP/Status](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status) |
+
+---
+
+---
+
+## 22. CRUD Deep Dive — Concept Reference
+
+CRUD stands for **Create, Read, Update, Delete**. These four operations map
+directly to SQL statements and HTTP verbs, and together they cover almost
+everything a REST API needs to do.
+
+### The big picture
+
+```
+Browser / Mobile App
+        │
+        │  HTTP request  (verb + URL + JSON body)
+        ▼
+   Express Router
+        │
+        │  1. Auth middleware  — is the user logged in?
+        │  2. Validation middleware — is the data valid?
+        ▼
+   Route Handler
+        │
+        │  3. Drizzle query  — talk to PostgreSQL
+        ▼
+   PostgreSQL
+        │
+        │  rows (typed TypeScript objects)
+        ▼
+   Route Handler
+        │
+        │  4. Format response  — pick the right status code + shape
+        ▼
+Browser / Mobile App
+```
+
+### The four operations and their SQL equivalents
+
+| CRUD | HTTP Verb | SQL | Idempotent? |
+|---|---|---|---|
+| Create | `POST` | `INSERT` | No — each call creates a new row |
+| Read | `GET` | `SELECT` | Yes — safe to repeat |
+| Update | `PUT` / `PATCH` | `UPDATE` | `PUT` yes, `PATCH` yes (if well-designed) |
+| Delete | `DELETE` | `DELETE` | Yes — deleting twice has the same result |
+
+**Idempotent** means calling the operation twice produces the same result as
+calling it once. `GET` is idempotent — reading data twice doesn't change
+anything.
+
+### Drizzle query patterns you will use repeatedly
+
+#### SELECT all rows
+
+```ts
+import { db } from '../db/connection.ts'
+import { issues } from '../db/schema.ts'
+
+const allIssues = await db.select().from(issues)
+// SQL: SELECT * FROM issues
+```
+
+#### SELECT with a WHERE clause
+
+```ts
+import { eq } from 'drizzle-orm'
+
+const issue = await db.select().from(issues).where(eq(issues.id, id))
+// SQL: SELECT * FROM issues WHERE id = $1
+```
+
+`eq` is Drizzle's equality operator. There are others: `ne` (not equal), `gt`
+(greater than), `lt` (less than), `and`, `or`, `like`, `inArray`, etc.
+
+#### INSERT and return the created row
+
+```ts
+const [newIssue] = await db
+  .insert(issues)
+  .values({ userId, name, description, isActive: true })
+  .returning()
+// SQL: INSERT INTO issues (...) VALUES (...) RETURNING *
+```
+
+`.returning()` tells PostgreSQL to hand back the inserted row including the
+auto-generated `id` and `createdAt`. We destructure the array to get the
+single inserted row.
+
+#### UPDATE
+
+```ts
+const [updated] = await db
+  .update(issues)
+  .set({ name: newName, updatedAt: new Date() })
+  .where(eq(issues.id, id))
+  .returning()
+// SQL: UPDATE issues SET name = $1, updated_at = $2 WHERE id = $3 RETURNING *
+```
+
+#### DELETE
+
+```ts
+await db.delete(issues).where(eq(issues.id, id))
+// SQL: DELETE FROM issues WHERE id = $1
+```
+
+For a soft delete, use `UPDATE` instead:
+
+```ts
+await db.update(issues).set({ isActive: false }).where(eq(issues.id, id))
+```
+
+#### SELECT with a JOIN (related data)
+
+```ts
+import { eq } from 'drizzle-orm'
+
+const issueWithUser = await db.query.issues.findFirst({
+  where: eq(issues.id, id),
+  with: { user: true, issueTags: { with: { tag: true } } },
+})
+```
+
+This uses Drizzle's relational query API (`db.query`). It requires that you
+pass `schema` to `drizzle()` (which our `connection.ts` already does).
+
+#### Pagination
+
+```ts
+const PAGE_SIZE = 20
+
+const page = Number(req.query.page) || 1
+const offset = (page - 1) * PAGE_SIZE
+
+const rows = await db
+  .select()
+  .from(issues)
+  .limit(PAGE_SIZE)
+  .offset(offset)
+  .orderBy(issues.createdAt)
+```
+
+### Consistent response shapes
+
+Always return data in a predictable shape. A good convention:
+
+```json
+// Single resource
+{
+  "data": { "id": "...", "name": "..." }
+}
+
+// Collection
+{
+  "data": [...],
+  "meta": { "total": 42, "page": 1, "pageSize": 20 }
+}
+
+// Error
+{
+  "error": "Not Found",
+  "message": "Issue with id abc123 does not exist"
+}
+```
+
+---
+
+## 23. Users — CRUD Operations & UI
+
+### Resource overview
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | UUID | Auto-generated, primary key |
+| `email` | string | Unique, max 255 chars |
+| `username` | string | Unique, max 50 chars |
+| `password` | string | bcrypt hash — never return this |
+| `firstName` | string (optional) | |
+| `lastName` | string (optional) | |
+| `createdAt` | timestamp | Auto set on insert |
+| `updatedAt` | timestamp | Should be updated on every change |
+
+---
+
+### CREATE User
+
+**API endpoint**: `POST /api/users`
+
+**What it does**: Creates a new user account in the database.
+
+#### Request
+
+```http
+POST /api/users
+Content-Type: application/json
+
+{
+  "email": "alice@example.com",
+  "username": "alice42",
+  "password": "SuperSecret!1",
+  "firstName": "Alice",
+  "lastName": "Smith"
+}
+```
+
+#### Validation rules (implement with Zod)
+
+```ts
+const createUserSchema = z.object({
+  email: z.string().email(),
+  username: z.string().min(3).max(50).regex(/^[a-zA-Z0-9_]+$/),
+  password: z.string().min(8).max(100),
+  firstName: z.string().max(50).optional(),
+  lastName: z.string().max(50).optional(),
+})
+```
+
+#### Implementation steps
+
+```ts
+// 1. Validate body (middleware handles this)
+// 2. Check for duplicate email/username
+const existing = await db
+  .select()
+  .from(users)
+  .where(or(eq(users.email, body.email), eq(users.username, body.username)))
+
+if (existing.length > 0) {
+  return res.status(409).json({ error: 'Email or username already taken' })
+}
+
+// 3. Hash the password
+const hashedPassword = await bcrypt.hash(body.password, env.BCRYPT_ROUNDS)
+
+// 4. Insert
+const [user] = await db
+  .insert(users)
+  .values({ ...body, password: hashedPassword })
+  .returning()
+
+// 5. Return 201 — omit the password field!
+const { password: _, ...safeUser } = user
+return res.status(201).json({ data: safeUser })
+```
+
+#### Success response (`201 Created`)
+
+```json
+{
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "email": "alice@example.com",
+    "username": "alice42",
+    "firstName": "Alice",
+    "lastName": "Smith",
+    "createdAt": "2026-04-17T13:00:00.000Z",
+    "updatedAt": "2026-04-17T13:00:00.000Z"
+  }
+}
+```
+
+#### Error responses
+
+| Situation | Status | Body |
+|---|---|---|
+| Invalid body | `400` | `{ "error": "Validation failed", "details": [...] }` |
+| Email/username taken | `409` | `{ "error": "Email or username already taken" }` |
+| DB error | `500` | `{ "error": "Internal Server Error" }` |
+
+---
+
+#### UI — Registration Page
+
+```
++------------------------------------------+
+|             Create an account            |
++------------------------------------------+
+|  Email                                   |
+|  +------------------------------------+  |
+|  | alice@example.com                  |  |
+|  +------------------------------------+  |
+|                                          |
+|  Username                                |
+|  +------------------------------------+  |
+|  | alice42                            |  |
+|  +------------------------------------+  |
+|                                          |
+|  Password                                |
+|  +------------------------------------+  |
+|  | ............                       |  |
+|  +------------------------------------+  |
+|                                          |
+|  First name (optional)  Last name        |
+|  +--------------+  +------------------+  |
+|  | Alice        |  | Smith            |  |
+|  +--------------+  +------------------+  |
+|                                          |
+|  +----------------------------------+    |
+|  |          Create account          |    |
+|  +----------------------------------+    |
+|                                          |
+|  Already have an account? Sign in ->     |
++------------------------------------------+
+```
+
+**What happens when the button is clicked:**
+1. Frontend validates the form locally (show inline errors before the request).
+2. `POST /api/users` is called with the form data.
+3. On `201` — redirect to login page with a success toast.
+4. On `409` — highlight the email/username field with "already taken" message.
+5. On `400` — show per-field errors returned in `details[]`.
+
+---
+
+### READ Users
+
+#### List all users — `GET /api/users`
+
+**What it does**: Returns a paginated list of all users.
+
+```http
+GET /api/users?page=1
+Authorization: Bearer <token>
+```
+
+**Implementation:**
+
+```ts
+const page = Number(req.query.page) || 1
+const limit = 20
+const offset = (page - 1) * limit
+
+const rows = await db
+  .select({
+    id: users.id,
+    email: users.email,
+    username: users.username,
+    firstName: users.firstName,
+    lastName: users.lastName,
+    createdAt: users.createdAt,
+  })
+  .from(users)
+  .limit(limit)
+  .offset(offset)
+  .orderBy(users.createdAt)
+
+return res.json({ data: rows, meta: { page, pageSize: limit } })
+```
+
+> **Security note**: never select the `password` column in list/detail
+> endpoints. Select only the specific columns you need.
+
+#### Success response (`200 OK`)
+
+```json
+{
+  "data": [
+    { "id": "...", "email": "alice@example.com", "username": "alice42", ... },
+    { "id": "...", "email": "bob@example.com",   "username": "bob99",   ... }
+  ],
+  "meta": { "page": 1, "pageSize": 20 }
+}
+```
+
+---
+
+#### Get one user — `GET /api/users/:id`
+
+```http
+GET /api/users/550e8400-e29b-41d4-a716-446655440000
+Authorization: Bearer <token>
+```
+
+**Implementation:**
+
+```ts
+const { id } = req.params
+
+const [user] = await db
+  .select({ id: users.id, email: users.email, username: users.username,
+            firstName: users.firstName, lastName: users.lastName, createdAt: users.createdAt })
+  .from(users)
+  .where(eq(users.id, id))
+
+if (!user) {
+  return res.status(404).json({ error: 'User not found' })
+}
+
+return res.json({ data: user })
+```
+
+#### Success response (`200 OK`)
+
+```json
+{
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "email": "alice@example.com",
+    "username": "alice42",
+    "firstName": "Alice",
+    "lastName": "Smith",
+    "createdAt": "2026-04-17T13:00:00.000Z"
+  }
+}
+```
+
+| Error situation | Status |
+|---|---|
+| `:id` not a valid UUID | `400` (validate with `z.string().uuid()`) |
+| User doesn't exist | `404` |
+
+---
+
+#### UI — User List Page
+
+```
++----------------------------------------------------------+
+|  Users                                    [+ New User]   |
++----------------------------------------------------------+
+|  Search by name or email...                              |
++--------+------------------+------------+-----------------+
+|  ID    |  Email           |  Username  |  Joined         |
++--------+------------------+------------+-----------------+
+|  ...00 | alice@example.com| alice42    | Apr 17, 2026    |
+|  ...01 | bob@example.com  | bob99      | Apr 16, 2026    |
++--------+------------------+------------+-----------------+
+|  < Prev   Page 1 of 50   Next >                         |
++----------------------------------------------------------+
+```
+
+- Each row is a link to `GET /api/users/:id`.
+- "New User" button opens the registration form.
+- Search box filters by calling `GET /api/users?search=alice` (requires adding
+  a `search` query parameter to the API).
+- Pagination buttons update the `?page=` query parameter.
+
+---
+
+#### UI — User Profile Page
+
+```
++-------------------------------------+
+|  <- Back to users                   |
++-------------------------------------+
+|  [User icon]  Alice Smith           |
+|  @alice42                           |
+|  alice@example.com                  |
+|  Joined: April 17, 2026             |
++-------------------------------------+
+|  [Edit Profile]    [Delete Account] |
++-------------------------------------+
+```
+
+---
+
+### UPDATE User
+
+**API endpoint**: `PUT /api/users/:id`
+
+**What it does**: Replaces the editable fields of a user record.
+
+```http
+PUT /api/users/550e8400-e29b-41d4-a716-446655440000
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "firstName": "Alicia",
+  "lastName": "Smith",
+  "username": "alicia42"
+}
+```
+
+**Validation schema:**
+
+```ts
+const updateUserSchema = z.object({
+  username: z.string().min(3).max(50).optional(),
+  firstName: z.string().max(50).optional(),
+  lastName: z.string().max(50).optional(),
+})
+```
+
+> **Note**: email and password changes should be separate, carefully protected
+> endpoints with additional verification steps (e.g. confirm current password
+> before changing it).
+
+**Implementation:**
+
+```ts
+const [updated] = await db
+  .update(users)
+  .set({ ...req.body, updateAt: new Date() })
+  .where(eq(users.id, req.params.id))
+  .returning()
+
+if (!updated) return res.status(404).json({ error: 'User not found' })
+
+const { password: _, ...safeUser } = updated
+return res.json({ data: safeUser })
+```
+
+#### Success response (`200 OK`)
+
+```json
+{
+  "data": { "id": "...", "username": "alicia42", "firstName": "Alicia", ... }
+}
+```
+
+---
+
+#### UI — Edit Profile Form
+
+```
++------------------------------------------+
+|  <- Cancel         Edit Profile    [Save] |
++------------------------------------------+
+|  Username                                |
+|  +------------------------------------+  |
+|  | alicia42                           |  |
+|  +------------------------------------+  |
+|                                          |
+|  First name               Last name      |
+|  +-----------------+  +---------------+  |
+|  | Alicia          |  | Smith         |  |
+|  +-----------------+  +---------------+  |
++------------------------------------------+
+```
+
+**Behaviour:**
+- The form is pre-filled by calling `GET /api/users/:id` when the page loads.
+- "Save" calls `PUT /api/users/:id` with only the changed fields.
+- On success, update the UI state and show a "Profile updated!" toast.
+- On `409` (username taken), highlight the field.
+
+---
+
+### DELETE User
+
+**API endpoint**: `DELETE /api/users/:id`
+
+**What it does**: Permanently removes a user and (via `onDelete: 'cascade'`)
+all their issues and related entries.
+
+```http
+DELETE /api/users/550e8400-e29b-41d4-a716-446655440000
+Authorization: Bearer <token>
+```
+
+**Implementation:**
+
+```ts
+const result = await db.delete(users).where(eq(users.id, req.params.id)).returning()
+
+if (result.length === 0) {
+  return res.status(404).json({ error: 'User not found' })
+}
+
+return res.status(204).send()
+```
+
+`204 No Content` — success, but there's nothing to return.
+
+#### UI — Delete Confirmation Modal
+
+```
++-----------------------------------------------------+
+|  [!] Delete account?                                |
+|                                                     |
+|  This will permanently delete Alice's account and   |
+|  all 47 issues tracked under it. This cannot be     |
+|  undone.                                            |
+|                                                     |
+|  Type your username to confirm:                     |
+|  +-------------------------------------------+     |
+|  | alice42                                   |     |
+|  +-------------------------------------------+     |
+|                                                     |
+|  [Cancel]                   [Delete permanently]   |
++-----------------------------------------------------+
+```
+
+**Behaviour:**
+- "Delete permanently" is disabled until the username is typed correctly.
+- On confirm, call `DELETE /api/users/:id`.
+- On `204`, clear the auth token and redirect to the home page.
+
+---
+
+## 24. Issues — CRUD Operations & UI
+
+Issues are the core resource of the application. Every issue belongs to one
+user and can have many tags and many completion entries.
+
+### Resource overview
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | UUID | Auto-generated |
+| `userId` | UUID | Foreign key -> users.id |
+| `name` | string | Short title, max 100 chars |
+| `description` | text | Optional long description |
+| `isActive` | boolean | `true` = open/active, `false` = archived |
+| `createdAt` | timestamp | |
+| `updatedAt` | timestamp | |
+
+---
+
+### CREATE Issue
+
+**API endpoint**: `POST /api/issues`
+
+```http
+POST /api/issues
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "Fix broken login button",
+  "description": "The login button on mobile doesn't respond to taps on iOS 17.",
+  "isActive": true
+}
+```
+
+**Validation schema** (from `issueRoutes.ts`, extended):
+
+```ts
+const createIssueSchema = z.object({
+  name: z.string().min(2).max(100),
+  description: z.string().max(1000).optional(),
+  isActive: z.boolean().default(true),
+})
+```
+
+**Implementation:**
+
+```ts
+// req.user.id comes from the auth middleware (JWT payload)
+const [issue] = await db
+  .insert(issues)
+  .values({
+    userId: req.user.id,
+    name: req.body.name,
+    description: req.body.description,
+    isActive: req.body.isActive ?? true,
+  })
+  .returning()
+
+return res.status(201).json({ data: issue })
+```
+
+#### Success response (`201 Created`)
+
+```json
+{
+  "data": {
+    "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+    "userId": "550e8400-e29b-41d4-a716-446655440000",
+    "name": "Fix broken login button",
+    "description": "The login button on mobile...",
+    "isActive": true,
+    "createdAt": "2026-04-17T13:10:00.000Z",
+    "updatedAt": "2026-04-17T13:10:00.000Z"
+  }
+}
+```
+
+---
+
+#### UI — New Issue Form
+
+```
++-----------------------------------------------+
+|  <- Back          New Issue              [Save] |
++-----------------------------------------------+
+|  Title *                                      |
+|  +-----------------------------------------+  |
+|  | Fix broken login button                 |  |
+|  +-----------------------------------------+  |
+|                                               |
+|  Description                                  |
+|  +-----------------------------------------+  |
+|  | The login button on mobile doesn't...   |  |
+|  |                                         |  |
+|  +-----------------------------------------+  |
+|                                               |
+|  Tags  [+ Add tag]                            |
+|  +----------+  +--------+                     |
+|  | [R] bug  |  | [M] iOS|                     |
+|  +----------+  +--------+                     |
++-----------------------------------------------+
+```
+
+**Behaviour:**
+1. User fills in the form.
+2. "Save" calls `POST /api/issues`.
+3. On `201` — navigate to the new issue's detail page.
+4. Tags: call `POST /api/issues/:id/tags` (or attach via `issueTags` in one
+   transaction) after creating the issue.
+
+---
+
+### READ Issues
+
+#### List all issues — `GET /api/issues`
+
+```http
+GET /api/issues?page=1&active=true
+Authorization: Bearer <token>
+```
+
+**Implementation with filtering:**
+
+```ts
+const page = Number(req.query.page) || 1
+const showActive = req.query.active !== 'false'
+
+const rows = await db
+  .select()
+  .from(issues)
+  .where(
+    and(
+      eq(issues.userId, req.user.id),
+      eq(issues.isActive, showActive)
+    )
+  )
+  .limit(20)
+  .offset((page - 1) * 20)
+  .orderBy(issues.createdAt)
+
+return res.json({ data: rows })
+```
+
+---
+
+#### UI — Issues List Page
+
+```
++------------------------------------------------------------+
+|  My Issues                               [+ New Issue]     |
++------------------------------------------------------------+
+|  [Active v]  Search...                                     |
++------------------------------------------------------------+
+|  [doc] Fix broken login button              Apr 17   [+]  |
+|        [R] bug  [M] iOS                                    |
++------------------------------------------------------------+
+|  [doc] Update README with setup instructions Apr 16   [ ] |
+|        [B] docs                                            |
++------------------------------------------------------------+
+|  < Prev   Page 1 of 5   Next >                             |
++------------------------------------------------------------+
+```
+
+- Clicking a row navigates to `GET /api/issues/:id`.
+- The `[Active v]` dropdown switches between `?active=true` and `?active=false`
+  (archived issues).
+- `[+]` = has at least one completion entry; `[ ]` = no entries yet.
+
+---
+
+#### Get one issue — `GET /api/issues/:id`
+
+```http
+GET /api/issues/7c9e6679-7425-40de-944b-e07fc1f90ae7
+Authorization: Bearer <token>
+```
+
+**Implementation (with related tags):**
+
+```ts
+const issue = await db.query.issues.findFirst({
+  where: eq(issues.id, req.params.id),
+  with: {
+    issueTags: { with: { tag: true } },
+    entries: { orderBy: (e, { desc }) => [desc(e.completionDate)] },
+  },
+})
+
+if (!issue) return res.status(404).json({ error: 'Issue not found' })
+
+// Ownership check
+if (issue.userId !== req.user.id) {
+  return res.status(403).json({ error: 'Forbidden' })
+}
+
+return res.json({ data: issue })
+```
+
+#### Success response (`200 OK`)
+
+```json
+{
+  "data": {
+    "id": "7c9e6679...",
+    "name": "Fix broken login button",
+    "description": "...",
+    "isActive": true,
+    "createdAt": "...",
+    "issueTags": [
+      { "tag": { "id": "...", "name": "bug", "color": "#ef4444" } }
+    ],
+    "entries": [
+      { "id": "...", "completionDate": "2026-04-17T14:00:00.000Z", "note": "Fixed on Android" }
+    ]
+  }
+}
+```
+
+---
+
+#### UI — Issue Detail Page
+
+```
++------------------------------------------------------------+
+|  <- Issues        Fix broken login button    [Edit] [...]  |
++------------------------------------------------------------+
+|  [R] bug   [M] iOS                                        |
+|                                                            |
+|  The login button on mobile doesn't respond to taps on     |
+|  iOS 17. Observed on iPhone 14 Pro with latest Safari.     |
+|                                                            |
+|  +----------------------+                                  |
+|  |  [+] Mark complete   |                                  |
+|  +----------------------+                                  |
++------------------------------------------------------------+
+|  Completion History (3)                                    |
+|  ----------------------------------------------------------  |
+|  Apr 17 14:00  "Fixed on Android"                          |
+|  Apr 15 09:30  "Reproduced - filed ticket with Apple"      |
+|  Apr 14 22:00  "Started investigating"                     |
++------------------------------------------------------------+
+```
+
+- "[Edit]" opens the edit form.
+- "[...]" opens a dropdown with Archive/Delete.
+- "Mark complete" calls `POST /api/issues/:id/complete` and opens a small
+  modal asking for an optional note.
+
+---
+
+### UPDATE Issue
+
+**API endpoint**: `PUT /api/issues/:id`
+
+```http
+PUT /api/issues/7c9e6679-7425-40de-944b-e07fc1f90ae7
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "Fix broken login button on iOS 17",
+  "description": "Updated description with more details."
+}
+```
+
+**Validation schema:**
+
+```ts
+const updateIssueSchema = z.object({
+  name: z.string().min(2).max(100).optional(),
+  description: z.string().max(1000).optional(),
+  isActive: z.boolean().optional(),
+})
+```
+
+**Implementation:**
+
+```ts
+const [updated] = await db
+  .update(issues)
+  .set({ ...req.body, updatedAt: new Date() })
+  .where(and(eq(issues.id, req.params.id), eq(issues.userId, req.user.id)))
+  .returning()
+
+if (!updated) return res.status(404).json({ error: 'Issue not found' })
+
+return res.json({ data: updated })
+```
+
+> **Security note**: always add `eq(issues.userId, req.user.id)` to the WHERE
+> clause. This prevents one user from editing another user's issues.
+
+---
+
+#### UI — Edit Issue Form
+
+Same layout as the New Issue Form, pre-populated with existing values. "Save"
+calls `PUT /api/issues/:id`.
+
+---
+
+### ARCHIVE / SOFT DELETE Issue
+
+Rather than deleting the row, we set `isActive = false`. This preserves the
+history of entries.
+
+**Implementation** (reuses the `PUT` endpoint with `isActive: false`, or a
+dedicated `PATCH`):
+
+```ts
+await db
+  .update(issues)
+  .set({ isActive: false, updatedAt: new Date() })
+  .where(and(eq(issues.id, req.params.id), eq(issues.userId, req.user.id)))
+```
+
+---
+
+### COMPLETE Issue — `POST /api/issues/:id/complete`
+
+This is not a standard CRUD operation — it's an **action**. It creates a new
+`entries` row for the issue.
+
+```http
+POST /api/issues/7c9e6679-7425-40de-944b-e07fc1f90ae7/complete
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "note": "Fixed on Android — iOS patch pending.",
+  "completionDate": "2026-04-17T14:00:00.000Z"
+}
+```
+
+**Implementation:**
+
+```ts
+const issueExists = await db
+  .select({ id: issues.id })
+  .from(issues)
+  .where(and(eq(issues.id, req.params.id), eq(issues.userId, req.user.id)))
+
+if (issueExists.length === 0) {
+  return res.status(404).json({ error: 'Issue not found' })
+}
+
+const [entry] = await db
+  .insert(entries)
+  .values({
+    issueId: req.params.id,
+    note: req.body.note,
+    completionDate: req.body.completionDate
+      ? new Date(req.body.completionDate)
+      : new Date(),
+  })
+  .returning()
+
+return res.status(201).json({ data: entry })
+```
+
+---
+
+#### UI — Mark Complete Modal
+
+```
++------------------------------------------+
+|  [+] Mark as Complete                    |
++------------------------------------------+
+|  Add a note (optional)                   |
+|  +------------------------------------+  |
+|  | Fixed on Android - iOS patch...    |  |
+|  +------------------------------------+  |
+|                                          |
+|  Completion date                         |
+|  +------------------------------------+  |
+|  | 2026-04-17   14:00                 |  |
+|  +------------------------------------+  |
+|                                          |
+|  [Cancel]                  [Log it [+]]  |
++------------------------------------------+
+```
+
+---
+
+### GET Issue Stats — `GET /api/issues/:id/stats`
+
+Returns aggregated data about completion entries for an issue.
+
+**Implementation (aggregate query):**
+
+```ts
+import { count, sql } from 'drizzle-orm'
+
+// Total entries
+const [{ total }] = await db
+  .select({ total: count() })
+  .from(entries)
+  .where(eq(entries.issueId, req.params.id))
+
+// Entries per week (last 8 weeks)
+const weekly = await db.execute(sql`
+  SELECT
+    DATE_TRUNC('week', completion_date) AS week,
+    COUNT(*) AS completions
+  FROM entries
+  WHERE issue_id = ${req.params.id}
+    AND completion_date >= NOW() - INTERVAL '8 weeks'
+  GROUP BY 1
+  ORDER BY 1 DESC
+`)
+
+return res.json({ data: { total, weekly: weekly.rows } })
+```
+
+#### UI — Stats View (part of Issue Detail)
+
+```
+  [chart] Stats
+  ----------------------------------------
+  Total completions: 14
+
+  Weekly activity (last 8 weeks):
+  Week of Apr 14  ||||||||  5
+  Week of Apr 7   ||||      3
+  Week of Mar 31  ||        2
+  ...
+```
+
+---
+
+## 25. Tags — CRUD Operations & UI
+
+Tags are simple labels that can be applied to many issues. They have a name
+and a colour.
+
+### Resource overview
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | UUID | Auto-generated |
+| `name` | string | Unique, max 50 chars |
+| `color` | string | Hex colour, default `#6b7280` |
+| `createdAt` | timestamp | |
+| `updatedAt` | timestamp | |
+
+---
+
+### CREATE Tag
+
+**API endpoint**: `POST /api/tags`
+
+```http
+POST /api/tags
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "bug",
+  "color": "#ef4444"
+}
+```
+
+**Validation schema:**
+
+```ts
+const createTagSchema = z.object({
+  name: z.string().min(1).max(50),
+  color: z
+    .string()
+    .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a valid hex color like #ef4444')
+    .default('#6b7280'),
+})
+```
+
+**Implementation:**
+
+```ts
+const [tag] = await db.insert(tags).values(req.body).returning()
+return res.status(201).json({ data: tag })
+```
+
+#### Success response (`201 Created`)
+
+```json
+{
+  "data": {
+    "id": "a3bb1890-...",
+    "name": "bug",
+    "color": "#ef4444",
+    "createdAt": "2026-04-17T13:20:00.000Z"
+  }
+}
+```
+
+| Error | Status |
+|---|---|
+| Duplicate name | `409` |
+| Invalid hex color | `400` |
+
+---
+
+#### UI — Tag Creation Form
+
+```
++------------------------------------------+
+|  New Tag                                 |
++------------------------------------------+
+|  Name                                    |
+|  +------------------------------------+  |
+|  | bug                                |  |
+|  +------------------------------------+  |
+|                                          |
+|  Colour                                  |
+|  +----------------------+                |
+|  | [R] #ef4444          |  [Pick...]    |
+|  +----------------------+                |
+|                                          |
+|  Preview: +----------+                  |
+|           | [R] bug  |                  |
+|           +----------+                  |
+|                                          |
+|  [Cancel]                  [Create Tag]  |
++------------------------------------------+
+```
+
+- The colour picker updates the preview badge in real time.
+- "Create Tag" calls `POST /api/tags`.
+
+---
+
+### READ Tags
+
+#### List all tags — `GET /api/tags`
+
+```http
+GET /api/tags
+Authorization: Bearer <token>
+```
+
+**Implementation:**
+
+```ts
+const allTags = await db.select().from(tags).orderBy(tags.name)
+return res.json({ data: allTags })
+```
+
+#### Success response (`200 OK`)
+
+```json
+{
+  "data": [
+    { "id": "...", "name": "bug",      "color": "#ef4444" },
+    { "id": "...", "name": "docs",     "color": "#3b82f6" },
+    { "id": "...", "name": "feature",  "color": "#10b981" }
+  ]
+}
+```
+
+---
+
+#### Get one tag — `GET /api/tags/:id`
+
+```http
+GET /api/tags/a3bb1890-...
+Authorization: Bearer <token>
+```
+
+Returns the tag plus all issues that have it (useful for a "filter by tag"
+page):
+
+```ts
+const tag = await db.query.tags.findFirst({
+  where: eq(tags.id, req.params.id),
+  with: {
+    issueTags: {
+      with: { issue: true },
+    },
+  },
+})
+
+if (!tag) return res.status(404).json({ error: 'Tag not found' })
+return res.json({ data: tag })
+```
+
+---
+
+#### UI — Tags Management Page
+
+```
++----------------------------------------------------+
+|  Tags                               [+ New Tag]    |
++--------+------------------+----------+-------------+
+|  Color |  Name            |  Issues  |  Actions    |
++--------+------------------+----------+-------------+
+|  [R]   | bug              |  12      | [Edit][Del] |
+|  [B]   | docs             |   4      | [Edit][Del] |
+|  [G]   | feature          |   8      | [Edit][Del] |
++--------+------------------+----------+-------------+
+```
+
+Clicking a tag name navigates to a filtered issues list:
+`GET /api/issues?tagId=a3bb1890-...` (requires adding `tagId` filtering).
+
+---
+
+### UPDATE Tag
+
+**API endpoint**: `PUT /api/tags/:id`
+
+```http
+PUT /api/tags/a3bb1890-...
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "bug-fix",
+  "color": "#f97316"
+}
+```
+
+**Validation schema:**
+
+```ts
+const updateTagSchema = z.object({
+  name: z.string().min(1).max(50).optional(),
+  color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
+})
+```
+
+**Implementation:**
+
+```ts
+const [updated] = await db
+  .update(tags)
+  .set({ ...req.body, updateAt: new Date() })
+  .where(eq(tags.id, req.params.id))
+  .returning()
+
+if (!updated) return res.status(404).json({ error: 'Tag not found' })
+return res.json({ data: updated })
+```
+
+---
+
+#### UI — Edit Tag Form (inline or modal)
+
+```
++------------------------------------------+
+|  Edit Tag                                |
++------------------------------------------+
+|  Name        +----------------------+   |
+|              | bug-fix              |   |
+|              +----------------------+   |
+|  Colour      [O] #f97316  [Pick...]     |
+|                                          |
+|  [Cancel]               [Save Changes]  |
++------------------------------------------+
+```
+
+---
+
+### DELETE Tag
+
+**API endpoint**: `DELETE /api/tags/:id`
+
+```http
+DELETE /api/tags/a3bb1890-...
+Authorization: Bearer <token>
+```
+
+**Implementation:**
+
+```ts
+const result = await db
+  .delete(tags)
+  .where(eq(tags.id, req.params.id))
+  .returning()
+
+if (result.length === 0) return res.status(404).json({ error: 'Tag not found' })
+
+return res.status(204).send()
+```
+
+Deleting a tag also removes all `issueTags` rows that reference it (via
+`onDelete: 'cascade'` in the schema) — the issues themselves are unaffected.
+
+#### UI — Delete Tag Confirmation
+
+```
++---------------------------------------------------+
+|  [!] Delete tag "bug"?                            |
+|                                                   |
+|  This will remove the tag from all 12 issues      |
+|  that currently use it. The issues themselves     |
+|  won't be deleted.                                |
+|                                                   |
+|  [Cancel]                     [Delete tag]        |
++---------------------------------------------------+
+```
+
+---
+
+## 26. Auth — Operations & UI
+
+Authentication is different from CRUD — it manages identity, not a resource
+you interact with directly.
+
+### REGISTER — `POST /api/auth/register`
+
+Creates a new user account and immediately signs them in.
+
+```http
+POST /api/auth/register
+Content-Type: application/json
+
+{
+  "email": "alice@example.com",
+  "username": "alice42",
+  "password": "SuperSecret!1",
+  "firstName": "Alice",
+  "lastName": "Smith"
+}
+```
+
+**Full implementation flow:**
+
+```ts
+// 1. Validate
+const body = registerSchema.parse(req.body)
+
+// 2. Check uniqueness
+const conflict = await db.select().from(users)
+  .where(or(eq(users.email, body.email), eq(users.username, body.username)))
+if (conflict.length > 0) {
+  return res.status(409).json({ error: 'Email or username already in use' })
+}
+
+// 3. Hash password
+const hash = await bcrypt.hash(body.password, env.BCRYPT_ROUNDS)
+
+// 4. Insert user
+const [user] = await db.insert(users).values({ ...body, password: hash }).returning()
+
+// 5. Issue JWT
+const token = await new SignJWT({ sub: user.id })
+  .setProtectedHeader({ alg: 'HS256' })
+  .setExpirationTime(env.JWT_EXPIRES_IN)
+  .sign(new TextEncoder().encode(env.JWT_SECRET))
+
+// 6. Return user (no password) + token
+const { password: _, ...safeUser } = user
+return res.status(201).json({ data: { user: safeUser, token } })
+```
+
+#### Success response (`201 Created`)
+
+```json
+{
+  "data": {
+    "user": { "id": "...", "email": "alice@example.com", ... },
+    "token": "eyJhbGciOiJIUzI1NiJ9..."
+  }
+}
+```
+
+---
+
+#### UI — Sign Up Page
+
+```
++------------------------------------------+
+|    [Bug icon] Issue Tracker              |
+|                                          |
+|          Create your account            |
++------------------------------------------+
+|  Email *                                 |
+|  +------------------------------------+  |
+|  +------------------------------------+  |
+|                                          |
+|  Username *                              |
+|  +------------------------------------+  |
+|  +------------------------------------+  |
+|                                          |
+|  Password *                              |
+|  +------------------------------------+  |
+|  +------------------------------------+  |
+|  [v] At least 8 characters              |
+|                                          |
+|  +----------------------------------+    |
+|  |         Sign Up                  |    |
+|  +----------------------------------+    |
+|                                          |
+|        Already have an account?          |
+|             Sign in ->                   |
++------------------------------------------+
+```
+
+---
+
+### LOGIN — `POST /api/auth/login`
+
+```http
+POST /api/auth/login
+Content-Type: application/json
+
+{
+  "email": "alice@example.com",
+  "password": "SuperSecret!1"
+}
+```
+
+**Implementation:**
+
+```ts
+const { email, password } = loginSchema.parse(req.body)
+
+// Find user
+const [user] = await db.select().from(users).where(eq(users.email, email))
+if (!user) {
+  // Use a generic message — don't confirm whether the email exists
+  return res.status(401).json({ error: 'Invalid email or password' })
+}
+
+// Verify password
+const valid = await bcrypt.compare(password, user.password)
+if (!valid) {
+  return res.status(401).json({ error: 'Invalid email or password' })
+}
+
+// Issue JWT
+const token = await new SignJWT({ sub: user.id })
+  .setProtectedHeader({ alg: 'HS256' })
+  .setExpirationTime(env.JWT_EXPIRES_IN)
+  .sign(new TextEncoder().encode(env.JWT_SECRET))
+
+const { password: _, ...safeUser } = user
+return res.json({ data: { user: safeUser, token } })
+```
+
+> **Security note**: always return the same error message (`"Invalid email or
+> password"`) whether the email doesn't exist or the password is wrong. This
+> prevents **user enumeration** — an attacker finding out which emails are
+> registered.
+
+#### Success response (`200 OK`)
+
+```json
+{
+  "data": {
+    "user": { "id": "...", "email": "alice@example.com", ... },
+    "token": "eyJhbGciOiJIUzI1NiJ9..."
+  }
+}
+```
+
+---
+
+#### UI — Sign In Page
+
+```
++------------------------------------------+
+|    [Bug icon] Issue Tracker              |
+|                                          |
+|            Welcome back                 |
++------------------------------------------+
+|  Email                                   |
+|  +------------------------------------+  |
+|  | alice@example.com                  |  |
+|  +------------------------------------+  |
+|                                          |
+|  Password                                |
+|  +------------------------------------+  |
+|  | ............               [eye]  |  |
+|  +------------------------------------+  |
+|                                          |
+|  +----------------------------------+    |
+|  |         Sign In                  |    |
+|  +----------------------------------+    |
+|                                          |
+|  [X] Invalid email or password          |  <- shown on 401
+|                                          |
+|   Don't have an account? Sign up ->     |
++------------------------------------------+
+```
+
+**Behaviour after successful login:**
+1. Store the JWT — either in `localStorage` or a `HttpOnly` cookie.
+2. Store the user object in your frontend state.
+3. Redirect to the Issues list page.
+
+---
+
+### LOGOUT — `POST /api/auth/logout`
+
+With stateless JWTs, logout is handled entirely on the client:
+
+```ts
+router.post('/logout', (req, res) => {
+  // With stateless JWTs, the server has nothing to do.
+  // The client deletes its stored token.
+  return res.json({ message: 'Logged out' })
+})
+```
+
+**Client-side:**
+```ts
+// Simply remove the token from storage
+localStorage.removeItem('token')
+// Redirect to sign-in page
+window.location.href = '/login'
+```
+
+For **server-side invalidation** (more secure — needed for "log out all
+devices"), maintain a token blocklist in the database or Redis:
+
+```ts
+// On logout, store the token's jti (JWT ID) claim in a blocklist table
+// On every authenticated request, check the blocklist before proceeding
+```
+
+---
+
+### TOKEN REFRESH — `POST /api/auth/refresh`
+
+JWTs expire (default: 7 days). Token refresh lets clients get a new token
+without asking the user to log in again.
+
+**How it works:**
+
+The server issues two tokens on login:
+1. **Access token** — short-lived (15 minutes), used for every API call.
+2. **Refresh token** — long-lived (7-30 days), stored securely, only sent to
+   `POST /api/auth/refresh`.
+
+```http
+POST /api/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "eyJhbGciOiJIUzI1NiJ9..."
+}
+```
+
+**Implementation:**
+
+```ts
+// 1. Verify the refresh token
+const { payload } = await jwtVerify(
+  body.refreshToken,
+  new TextEncoder().encode(env.JWT_SECRET)
+)
+
+// 2. Check it's a refresh token (use a custom claim: { type: 'refresh' })
+if (payload.type !== 'refresh') {
+  return res.status(401).json({ error: 'Invalid token type' })
+}
+
+// 3. Issue a new short-lived access token
+const newAccessToken = await new SignJWT({ sub: payload.sub })
+  .setProtectedHeader({ alg: 'HS256' })
+  .setExpirationTime('15m')
+  .sign(secret)
+
+return res.json({ data: { token: newAccessToken } })
+```
+
+---
+
+## 27. Connecting a Frontend to the API
+
+This section shows you how any frontend (plain HTML+JS, React, Vue, etc.)
+communicates with the API we've built.
+
+### The `fetch` function
+
+The browser's built-in `fetch` is all you need for HTTP requests:
+
+```ts
+// Basic GET
+const res = await fetch('http://localhost:3000/api/issues')
+const { data } = await res.json()
+console.log(data) // array of issues
+```
+
+### Sending JSON
+
+```ts
+const res = await fetch('http://localhost:3000/api/issues', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${localStorage.getItem('token')}`,
+  },
+  body: JSON.stringify({
+    name: 'Fix broken login button',
+    description: 'Taps ignored on iOS 17',
+  }),
+})
+
+if (!res.ok) {
+  const err = await res.json()
+  console.error(err.error, err.details)
+  return
+}
+
+const { data } = await res.json()
+console.log('Created:', data)
+```
+
+### Token storage
+
+| Method | Security | When to use |
+|---|---|---|
+| `localStorage` | Vulnerable to XSS | Simple prototypes only |
+| `sessionStorage` | Same as localStorage, cleared on tab close | Short sessions |
+| `HttpOnly` cookie | JS can't read it — XSS safe | Production apps |
+| In-memory (variable) | No persistence — most secure | SPAs that don't need page refresh |
+
+For production use an `HttpOnly` cookie: the browser automatically sends it
+with every request, and JavaScript can never steal it.
+
+### A reusable API client (TypeScript example)
+
+```ts
+// src/api.ts
+
+const BASE_URL = 'http://localhost:3000'
+
+function getToken(): string | null {
+  return localStorage.getItem('token')
+}
+
+async function apiFetch<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const token = getToken()
+
+  const res = await fetch(`${BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.headers ?? {}),
+    },
+  })
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ error: 'Unknown error' }))
+    throw new Error(error.error ?? `HTTP ${res.status}`)
+  }
+
+  // 204 No Content has no body
+  if (res.status === 204) return undefined as T
+
+  return res.json()
+}
+
+// Typed helper functions for each resource
+export const api = {
+  auth: {
+    login: (email: string, password: string) =>
+      apiFetch<{ data: { token: string; user: User } }>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+      }),
+    register: (data: RegisterPayload) =>
+      apiFetch<{ data: { token: string; user: User } }>('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  },
+  issues: {
+    list: (page = 1) =>
+      apiFetch<{ data: Issue[] }>(`/api/issues?page=${page}`),
+    get: (id: string) =>
+      apiFetch<{ data: Issue }>(`/api/issues/${id}`),
+    create: (payload: CreateIssuePayload) =>
+      apiFetch<{ data: Issue }>('/api/issues', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    update: (id: string, payload: UpdateIssuePayload) =>
+      apiFetch<{ data: Issue }>(`/api/issues/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+    complete: (id: string, note?: string) =>
+      apiFetch<{ data: Entry }>(`/api/issues/${id}/complete`, {
+        method: 'POST',
+        body: JSON.stringify({ note }),
+      }),
+    delete: (id: string) =>
+      apiFetch<void>(`/api/issues/${id}`, { method: 'DELETE' }),
+  },
+  tags: {
+    list: () => apiFetch<{ data: Tag[] }>('/api/tags'),
+    create: (payload: CreateTagPayload) =>
+      apiFetch<{ data: Tag }>('/api/tags', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    update: (id: string, payload: UpdateTagPayload) =>
+      apiFetch<{ data: Tag }>(`/api/tags/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+    delete: (id: string) =>
+      apiFetch<void>(`/api/tags/${id}`, { method: 'DELETE' }),
+  },
+}
+```
+
+**Usage:**
+
+```ts
+// Login
+const { data } = await api.auth.login('alice@example.com', 'SuperSecret!1')
+localStorage.setItem('token', data.token)
+
+// Create an issue
+const { data: newIssue } = await api.issues.create({
+  name: 'Fix broken login button',
+  description: 'Taps ignored on iOS 17',
+})
+
+// Handle errors
+try {
+  await api.issues.delete('some-id')
+} catch (err) {
+  alert(err.message) // "Issue not found"
+}
+```
+
+### Handling token expiry
+
+```ts
+// Wrap every API call - if we get a 401, try refreshing the token once
+async function fetchWithRefresh<T>(path: string, options?: RequestInit): Promise<T> {
+  try {
+    return await apiFetch<T>(path, options)
+  } catch (err) {
+    if (err.message === 'Unauthorized') {
+      // Try to get a new access token
+      const refreshToken = localStorage.getItem('refreshToken')
+      if (!refreshToken) throw err
+
+      const { data } = await api.auth.refresh(refreshToken)
+      localStorage.setItem('token', data.token)
+
+      // Retry the original request with the new token
+      return apiFetch<T>(path, options)
+    }
+    throw err
+  }
+}
+```
+
+### CRUD to UI action to API call cheatsheet
+
+| User action | UI event | API call |
+|---|---|---|
+| Click "Sign Up" | Form submit | `POST /api/auth/register` |
+| Click "Sign In" | Form submit | `POST /api/auth/login` |
+| Click "Sign Out" | Button click | `POST /api/auth/logout` + clear token |
+| Open issues list | Page load | `GET /api/issues` |
+| Open issue detail | Row click | `GET /api/issues/:id` |
+| Click "New Issue" + save | Form submit | `POST /api/issues` |
+| Click "Edit" + save | Form submit | `PUT /api/issues/:id` |
+| Click "Archive" | Button click | `PUT /api/issues/:id` with `{ isActive: false }` |
+| Click "Delete" + confirm | Modal confirm | `DELETE /api/issues/:id` |
+| Click "Mark complete" + save | Modal confirm | `POST /api/issues/:id/complete` |
+| Open stats | Tab click | `GET /api/issues/:id/stats` |
+| Open tags list | Page load | `GET /api/tags` |
+| Click "New Tag" + save | Form submit | `POST /api/tags` |
+| Click "Edit tag" + save | Form submit | `PUT /api/tags/:id` |
+| Click "Delete tag" + confirm | Modal confirm | `DELETE /api/tags/:id` |
 
 ---
 
