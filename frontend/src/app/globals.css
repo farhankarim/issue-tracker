@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+:root {
+  --primary: #1565C0;
+  --primary-light: #1976D2;
+  --primary-dark: #0D47A1;
+  --on-primary: #FFFFFF;
+  --primary-container: #D1E4FF;
+  --on-primary-container: #001D36;
+  --secondary: #535F70;
+  --secondary-container: #D7E3F7;
+  --surface: #FDFBFF;
+  --surface-variant: #DFE2EB;
+  --on-surface: #1A1C1E;
+  --on-surface-variant: #43474E;
+  --outline: #73777F;
+  --error: #BA1A1A;
+  --error-container: #FFDAD6;
+  --success: #2E7D32;
+  --warning: #F57F17;
+  --background: #FDFBFF;
+}
+
+.dark {
+  --primary: #A8C8FF;
+  --primary-light: #84B0FF;
+  --primary-dark: #004A99;
+  --on-primary: #00315B;
+  --primary-container: #004A99;
+  --on-primary-container: #D1E4FF;
+  --secondary: #BBC7DB;
+  --secondary-container: #3B4858;
+  --surface: #1A1C1E;
+  --surface-variant: #43474E;
+  --on-surface: #E2E2E6;
+  --on-surface-variant: #C3C6CF;
+  --outline: #8D9199;
+  --error: #FFB4AB;
+  --error-container: #93000A;
+  --success: #81C784;
+  --warning: #FFD54F;
+  --background: #1A1C1E;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--background);
+  color: var(--on-surface);
+  font-family: 'Segoe UI', Roboto, sans-serif;
+}

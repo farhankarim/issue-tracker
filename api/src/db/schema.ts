@@ -1,75 +1,61 @@
 import {
-  pgTable,
-  uuid,
-  varchar,
+  sqliteTable,
   text,
-  timestamp,
-  boolean,
   integer,
-} from 'drizzle-orm/pg-core'
+} from 'drizzle-orm/sqlite-core'
 import { relations } from 'drizzle-orm'
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod'
 
-export const users = pgTable('users', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  email: varchar('email', { length: 255 }).notNull().unique(),
-  username: varchar('username', { length: 50 }).notNull().unique(),
-  password: varchar('password', {
-    length: 255,
-  }).notNull(),
-
-  firstName: varchar('first_name', { length: 50 }),
-  lastName: varchar('last_name', { length: 50 }),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updateAt: timestamp('updated_at').defaultNow().notNull(),
+export const users = sqliteTable('users', {
+  id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+  email: text('email').notNull().unique(),
+  username: text('username').notNull().unique(),
+  password: text('password').notNull(),
+  firstName: text('first_name'),
+  lastName: text('last_name'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).$defaultFn(() => new Date()).notNull(),
+  updateAt: integer('updated_at', { mode: 'timestamp' }).$defaultFn(() => new Date()).notNull(),
 })
 
-export const issues = pgTable('issues', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  userId: uuid('user_id')
+export const issues = sqliteTable('issues', {
+  id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+  userId: text('user_id')
     .references(() => users.id, { onDelete: 'cascade' })
     .notNull(),
-  name: varchar('name', { length: 100 }).notNull(),
+  name: text('name').notNull(),
   description: text('description'),
-  isActive: boolean('is_active').default(true).notNull(),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(), // rename for consistency
+  isActive: integer('is_active', { mode: 'boolean' }).default(true).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).$defaultFn(() => new Date()).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).$defaultFn(() => new Date()).notNull(),
 })
 
-export const entries = pgTable('entries', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  issueId: uuid('issue_id')
-    .references(() => issues.id, {
-      onDelete: 'cascade',
-    })
+export const entries = sqliteTable('entries', {
+  id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+  issueId: text('issue_id')
+    .references(() => issues.id, { onDelete: 'cascade' })
     .notNull(),
-
-  completionDate: timestamp('completion_date').defaultNow().notNull(),
+  completionDate: integer('completion_date', { mode: 'timestamp' }).$defaultFn(() => new Date()).notNull(),
   note: text('note'),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).$defaultFn(() => new Date()).notNull(),
 })
 
-export const tags = pgTable('tags', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  name: varchar('name', { length: 50 }).notNull().unique(),
-  color: varchar('color', { length: 50 }).default('#6b7280'),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updateAt: timestamp('updated_at').defaultNow().notNull(),
+export const tags = sqliteTable('tags', {
+  id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+  name: text('name').notNull().unique(),
+  color: text('color').default('#6b7280'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).$defaultFn(() => new Date()).notNull(),
+  updateAt: integer('updated_at', { mode: 'timestamp' }).$defaultFn(() => new Date()).notNull(),
 })
 
-export const issueTags = pgTable('issueTags', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  issueId: uuid('issue_id')
-    .references(() => issues.id, {
-      onDelete: 'cascade',
-    })
+export const issueTags = sqliteTable('issueTags', {
+  id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+  issueId: text('issue_id')
+    .references(() => issues.id, { onDelete: 'cascade' })
     .notNull(),
-  tagId: uuid('tag_id')
-    .references(() => tags.id, {
-      onDelete: 'cascade',
-    })
+  tagId: text('tag_id')
+    .references(() => tags.id, { onDelete: 'cascade' })
     .notNull(),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).$defaultFn(() => new Date()).notNull(),
 })
 
 export const userRelations = relations(users, ({ many }) => ({
